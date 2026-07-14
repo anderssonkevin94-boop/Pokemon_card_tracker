@@ -20,19 +20,32 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
   const [cameraFor, setCameraFor] = useState<CardSide | null>(null)
   const [name, setName] = useState('')
   const [number, setNumber] = useState('')
-  const [results, setResults] = useState<ApiCard[] | null>(null)
+  const [candidates, setCandidates] = useState<ApiCard[] | null>(null)
+  const [picked, setPicked] = useState<ApiCard | null>(null)
+  const [identifying, setIdentifying] = useState<string | null>(null) // status text while auto-ID runs
+  const [ocrHint, setOcrHint] = useState<string | null>(null)
+  const [showManual, setShowManual] = useState(false)
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [picked, setPicked] = useState<ApiCard | null>(null)
   const [variant, setVariant] = useState<Variant>('normal')
   const [sellStatus, setSellStatus] = useState<SellStatus>('undecided')
   const [saving, setSaving] = useState(false)
   const previews = useRef<Map<Blob, string>>(new Map())
+  const identifiedBlob = useRef<Blob | null>(null)
 
   useEffect(() => {
     const map = previews.current
     return () => map.forEach((url) => URL.revokeObjectURL(url))
   }, [])
+
+  // Auto-identify whenever a new front photo lands.
+  useEffect(() => {
+    if (photos.front && photos.front !== identifiedBlob.current) {
+      identifiedBlob.current = photos.front
+      identify(photos.front)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photos.front])
 
   function previewUrl(blob: Blob): string {
     let url = previews.current.get(blob)
@@ -49,14 +62,66 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
     setPhotos((p) => ({ ...p, [side]: compressed }))
   }
 
+  async function identify(front: Blob) {
+    setError(null)
+    setPicked(null)
+    setCandidates(null)
+    setOcrHint(null)
+    setShowManual(false)
+    try {
+      setIdentifying('Reading card text…')
+      const { readCardText, nameSimilarity } = await import('../lib/cardId')
+      const reading = await readCardText(front)
+      if (!reading.name && !reading.number) {
+        setOcrHint('Couldn’t read the card — search manually below.')
+        setShowManual(true)
+        return
+      }
+      setOcrHint(
+        `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}` : ''}`,
+      )
+      setIdentifying('Finding matches…')
+      const apiKey = await getSetting('apiKey')
+      // Precise pass first (name + collector number), then name-only to fill
+      // out alternates — the name-only page holds only the ~24 newest prints.
+      const exact = reading.number
+        ? await searchCards({ name: reading.name, number: reading.number, apiKey })
+        : []
+      const broad = await searchCards({ name: reading.name, apiKey })
+      const seen = new Set<string>()
+      const found = [...exact, ...broad].filter((c) => !seen.has(c.id) && seen.add(c.id))
+      if (found.length === 0) {
+        setOcrHint(`Read "${reading.name ?? reading.number}" but found no matches — search manually below.`)
+        setShowManual(true)
+        return
+      }
+      const scored = found
+        .map((c, i) => {
+          let score = reading.name ? nameSimilarity(reading.name, c.name) : 0
+          if (reading.number && parseInt(c.number, 10) === parseInt(reading.number, 10)) score += 2
+          return { c, score, i }
+        })
+        .sort((a, b) => b.score - a.score || a.i - b.i)
+      const ranked = scored.map((s) => s.c)
+      setCandidates(ranked.slice(0, 6))
+      pick(ranked[0]) // most likely match, preselected — user approves before saving
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Identification failed')
+      setShowManual(true)
+    } finally {
+      setIdentifying(null)
+    }
+  }
+
   async function doSearch() {
     setSearching(true)
     setError(null)
-    setResults(null)
+    setCandidates(null)
+    setPicked(null)
     try {
       const apiKey = await getSetting('apiKey')
       const found = await searchCards({ name, number, apiKey })
-      setResults(found)
+      setCandidates(found.slice(0, 24))
       if (found.length === 0) setError('No matches — check spelling, or try just the card number.')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Search failed — are you online?')
@@ -118,6 +183,7 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
 
   const variants = picked ? availableVariants(picked) : []
   const pickedPrice = picked ? bestPrice(priceForVariant(picked, variant)) : undefined
+  const alternates = candidates?.filter((c) => c.id !== picked?.id) ?? []
 
   return (
     <div className="page">
@@ -132,7 +198,7 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
             ) : (
               <>
                 <span style={{ fontSize: 28 }}>📷</span>
-                <span>{side === 'front' ? 'Front (used for grading)' : 'Back (optional)'}</span>
+                <span>{side === 'front' ? 'Front (identifies + grades)' : 'Back (optional)'}</span>
               </>
             )}
           </button>
@@ -140,50 +206,19 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
       </div>
 
       <h2>2. Identify</h2>
-      <div className="row">
-        <input
-          placeholder="Card name, e.g. Charizard"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && doSearch()}
-        />
-        <input
-          placeholder="No."
-          value={number}
-          style={{ width: 90, flexShrink: 0 }}
-          onChange={(e) => setNumber(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && doSearch()}
-        />
-      </div>
-      <button className="btn btn-primary btn-block" onClick={doSearch} disabled={searching || (!name.trim() && !number.trim())}>
-        {searching ? 'Searching…' : 'Search'}
-      </button>
-      {error && <p className="error-text">{error}</p>}
-
-      {results && results.length > 0 && !picked && (
-        <div style={{ marginTop: 12 }}>
-          {results.map((c) => (
-            <button key={c.id} className="list-row" onClick={() => pick(c)}>
-              <img src={c.images.small} alt="" loading="lazy" />
-              <div>
-                <div style={{ fontWeight: 600 }}>{c.name} <span className="dim">#{c.number}</span></div>
-                <div className="dim">{c.set.name} · {c.rarity ?? 'Unknown rarity'}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
+      {identifying && <p className="dim">⏳ {identifying}</p>}
+      {ocrHint && !identifying && <p className="dim">{ocrHint}</p>}
 
       {picked && (
         <>
-          <div className="list-row" style={{ cursor: 'default' }}>
+          <div className="list-row" style={{ cursor: 'default', borderColor: 'var(--accent)' }}>
             <img src={picked.images.small} alt="" />
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600 }}>{picked.name} <span className="dim">#{picked.number}</span></div>
-              <div className="dim">{picked.set.name}</div>
+              <div className="dim">{picked.set.name} · {picked.rarity ?? 'Unknown rarity'}</div>
               {pickedPrice != null && <div style={{ color: 'var(--green)', fontWeight: 700 }}>${pickedPrice.toFixed(2)}</div>}
             </div>
-            <button className="btn" onClick={() => setPicked(null)}>Change</button>
+            <span className="badge keep">best match</span>
           </div>
 
           {variants.length > 1 && (
@@ -207,10 +242,58 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
           </div>
 
           <button className="btn btn-primary btn-block" onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save to collection'}
+            {saving ? 'Saving…' : '✓ Approve & add to collection'}
           </button>
           {!photos.front && <p className="notice">No front photo — the card will be saved without a grade estimate.</p>}
         </>
+      )}
+
+      {alternates.length > 0 && (
+        <>
+          <h2>{picked ? 'Not this card? Tap the right one:' : 'Matches'}</h2>
+          {alternates.map((c) => (
+            <button key={c.id} className="list-row" onClick={() => pick(c)}>
+              <img src={c.images.small} alt="" loading="lazy" />
+              <div>
+                <div style={{ fontWeight: 600 }}>{c.name} <span className="dim">#{c.number}</span></div>
+                <div className="dim">{c.set.name} · {c.rarity ?? 'Unknown rarity'}</div>
+              </div>
+            </button>
+          ))}
+        </>
+      )}
+
+      {error && <p className="error-text">{error}</p>}
+
+      {(showManual || candidates || picked) && !identifying ? (
+        !showManual && (
+          <button className="btn btn-block" onClick={() => setShowManual(true)}>
+            Search manually instead
+          </button>
+        )
+      ) : null}
+
+      {(showManual || (!photos.front && !identifying)) && (
+        <div style={{ marginTop: 8 }}>
+          <div className="row">
+            <input
+              placeholder="Card name, e.g. Charizard"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && doSearch()}
+            />
+            <input
+              placeholder="No."
+              value={number}
+              style={{ width: 90, flexShrink: 0 }}
+              onChange={(e) => setNumber(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && doSearch()}
+            />
+          </div>
+          <button className="btn btn-primary btn-block" onClick={doSearch} disabled={searching || (!name.trim() && !number.trim())}>
+            {searching ? 'Searching…' : 'Search'}
+          </button>
+        </div>
       )}
 
       {cameraFor && (

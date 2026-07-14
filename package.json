@@ -13,7 +13,8 @@
     "dexie": "^4.4.4",
     "dexie-react-hooks": "^4.4.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
