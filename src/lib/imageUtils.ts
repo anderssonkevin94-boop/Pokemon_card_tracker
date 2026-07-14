@@ -1,7 +1,17 @@
+// iPhone photos are stored rotated with an EXIF flag — always honor it or
+// every downstream crop (OCR bands, grading corners) lands in the wrong place.
+export async function orientedBitmap(source: Blob): Promise<ImageBitmap> {
+  try {
+    return await createImageBitmap(source, { imageOrientation: 'from-image' })
+  } catch {
+    return await createImageBitmap(source) // older browsers without the option
+  }
+}
+
 // Downscale + compress a photo to JPEG before storing in IndexedDB.
-// ~1600px keeps enough detail for grading analysis while staying ~200-400KB.
-export async function compressImage(source: Blob, maxDim = 1600, quality = 0.85): Promise<Blob> {
-  const bitmap = await createImageBitmap(source)
+// ~2048px keeps enough detail for re-analysis while staying ~300-600KB.
+export async function compressImage(source: Blob, maxDim = 2048, quality = 0.85): Promise<Blob> {
+  const bitmap = await orientedBitmap(source)
   const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height))
   const w = Math.round(bitmap.width * scale)
   const h = Math.round(bitmap.height * scale)
@@ -19,7 +29,7 @@ export async function compressImage(source: Blob, maxDim = 1600, quality = 0.85)
 }
 
 export async function blobToImageData(blob: Blob, maxDim = 800): Promise<ImageData> {
-  const bitmap = await createImageBitmap(blob)
+  const bitmap = await orientedBitmap(blob)
   const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height))
   const w = Math.round(bitmap.width * scale)
   const h = Math.round(bitmap.height * scale)

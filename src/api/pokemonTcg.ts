@@ -26,7 +26,13 @@ export interface ApiCard {
 async function request(path: string, apiKey?: string): Promise<Response> {
   const headers: Record<string, string> = {}
   if (apiKey) headers['X-Api-Key'] = apiKey
-  const res = await fetch(`${BASE}${path}`, { headers })
+  let res: Response
+  try {
+    res = await fetch(`${BASE}${path}`, { headers })
+  } catch {
+    // fetch itself failed: offline, or the card database was too slow to answer
+    throw new Error('Card database is slow or unreachable right now — try again in a minute.')
+  }
   if (res.status === 429) throw new Error('Rate limited by pokemontcg.io — try again in a minute')
   if (!res.ok) throw new Error(`pokemontcg.io error ${res.status}`)
   return res

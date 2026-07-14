@@ -40,7 +40,7 @@ export default defineConfig({
             handler: 'NetworkFirst',
             options: {
               cacheName: 'tcg-api',
-              networkTimeoutSeconds: 10,
+              networkTimeoutSeconds: 25,
               expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 },
             },
           },

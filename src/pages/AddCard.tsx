@@ -252,6 +252,9 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
       {/* native camera app — full photo quality, no permission prompts */}
       <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={onFilePicked} />
       <input ref={libraryInput} type="file" accept="image/*" hidden onChange={onFilePicked} />
+      <p className="dim" style={{ marginTop: 6 }}>
+        Tip: shoot straight-on in portrait, card filling most of the frame, on a plain contrasting background.
+      </p>
 
       <h2>2. Identify</h2>
       {identifying && <p className="dim">⏳ {identifying}</p>}
