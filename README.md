@@ -38,6 +38,17 @@ Any static host works (Netlify, GitHub Pages, Cloudflare Pages).
    requests/day — a 3000-card daily refresh uses a fraction of that).
 2. Paste it in the app under **Settings**.
 
+## Card identification
+
+Photos are identified by two engines whose scores are merged: a perceptual
+image match against every card's official artwork (fingerprints ship in
+`public/card-hashes.json`, ~1MB), and on-device OCR of the name + collector
+number. Rebuild the fingerprint file to pick up newly released sets:
+
+```sh
+node scripts/build-hash-db.mjs   # ~30-60 min, resumable, then commit + push
+```
+
 ## Notes
 
 - **Prices** are TCGplayer market prices for *raw* (ungraded) near-mint cards,

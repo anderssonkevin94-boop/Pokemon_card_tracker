@@ -3,6 +3,7 @@ import { db, getSetting, todayFromDate, type CardSide, type SellStatus, type Var
 import {
   searchCards,
   searchByNumberTotal,
+  fetchCardsByIds,
   availableVariants,
   priceForVariant,
   bestPrice,
@@ -85,25 +86,47 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
     setOcrHint(null)
     setShowManual(false)
     try {
-      setIdentifying('Reading card text…')
-      const { readCardText, nameSimilarity } = await import('../lib/cardId')
-      const reading = await readCardText(front, (s) => setIdentifying(s))
-      if (!reading.name && !reading.number) {
-        setOcrHint('Couldn’t read the card — search manually below.')
+      setIdentifying('Analyzing photo…')
+      const [{ readCardText, nameSimilarity }, { matchCardImage }] = await Promise.all([
+        import('../lib/cardId'),
+        import('../lib/imageMatch'),
+      ])
+      // Two independent engines in parallel: perceptual image match against
+      // every card's official image, and OCR of the name/collector number.
+      const [ocrRes, hashRes] = await Promise.allSettled([
+        readCardText(front, (s) => setIdentifying(s)),
+        matchCardImage(front),
+      ])
+      const reading = ocrRes.status === 'fulfilled' ? ocrRes.value : {}
+      const hashMatches = hashRes.status === 'fulfilled' ? hashRes.value : []
+      // beyond ~46/128 bits a hash "match" is noise — don't let it vote
+      const usableHashes = hashMatches.filter((m) => m.distance <= 46)
+
+      if (!reading.name && !reading.number && usableHashes.length === 0) {
+        setOcrHint('Couldn’t identify the card — search manually below.')
         setShowManual(true)
         return
       }
-      setOcrHint(
-        `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}${reading.total ? `/${reading.total}` : ''}` : ''}`,
-      )
+      const readPart = reading.name || reading.number
+        ? `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}${reading.total ? `/${reading.total}` : ''}` : ''}`
+        : 'Text unreadable'
+      const matchPart = usableHashes.length > 0 ? ' · image matched' : ''
+      setOcrHint(readPart + matchPart)
+
       setIdentifying('Finding matches…')
       const apiKey = await getSetting('apiKey')
 
-      // Three passes, most precise first:
-      // 1. number + set size ("58/102" is nearly unique across all sets)
-      // 2. name + number
-      // 3. name only (newest prints) — fills out the alternates
-      const passes: { cards: ApiCard[]; boost: number }[] = []
+      // Candidate passes, strongest signal first:
+      // 1. image fingerprint matches (distance-weighted)
+      // 2. number + set size ("58/102" is nearly unique across all sets)
+      // 3. name + number
+      // 4. name only (newest prints) — fills out the alternates
+      const passes: { cards: ApiCard[]; boost: number | ((c: ApiCard) => number) }[] = []
+      if (usableHashes.length > 0) {
+        const byDist = new Map(usableHashes.map((m) => [m.id, m.distance]))
+        const cards = await fetchCardsByIds([...byDist.keys()], apiKey)
+        passes.push({ cards, boost: (c) => Math.max(0, (46 - (byDist.get(c.id) ?? 46)) / 8) })
+      }
       if (reading.number && reading.total) {
         passes.push({ cards: await searchByNumberTotal(reading.number, reading.total, apiKey), boost: 3 })
       }
@@ -119,17 +142,22 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
         passes.push({ cards: broad, boost: 0 })
       }
 
+      // Scores add up across passes: a card that both looks right and reads
+      // right beats one that only matches a single signal.
       const scoreById = new Map<string, { c: ApiCard; score: number; order: number }>()
       let order = 0
       for (const pass of passes) {
         for (const c of pass.cards) {
+          const passBoost = typeof pass.boost === 'function' ? pass.boost(c) : pass.boost
           const nameScore = reading.name ? nameSimilarity(reading.name, c.name) : 0
           const numScore =
             reading.number && parseInt(c.number, 10) === parseInt(reading.number, 10) ? 1 : 0
-          const score = pass.boost + nameScore + numScore
+          const score = passBoost + nameScore + numScore
           const existing = scoreById.get(c.id)
-          if (!existing || existing.score < score) {
-            scoreById.set(c.id, { c, score, order: existing?.order ?? order++ })
+          if (existing) {
+            existing.score += passBoost // signals stack across passes
+          } else {
+            scoreById.set(c.id, { c, score, order: order++ })
           }
         }
       }
@@ -138,7 +166,7 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
         .map((s) => s.c)
 
       if (ranked.length === 0) {
-        setOcrHint(`Read "${reading.name ?? reading.number}" but found no matches — search manually below.`)
+        setOcrHint(`${readPart} — no matches found, search manually below.`)
         setShowManual(true)
         return
       }

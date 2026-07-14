@@ -25,6 +25,9 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
+        // include the card fingerprint database in the offline precache
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,json,webmanifest}'],
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
             // official card images from the TCG CDN — cache aggressively
