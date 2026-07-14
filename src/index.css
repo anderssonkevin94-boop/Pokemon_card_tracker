@@ -119,29 +119,12 @@ label { display: block; font-size: 13px; color: var(--text-dim); margin: 12px 0 
 }
 .photo-slot img { width: 100%; height: 100%; object-fit: cover; }
 
-/* ---- camera overlay ---- */
-.camera-overlay {
-  position: fixed; inset: 0; z-index: 100; background: black;
-  display: flex; flex-direction: column;
-}
-.camera-overlay video { flex: 1; object-fit: cover; width: 100%; }
-.camera-guide {
-  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: min(78vw, 46vh); aspect-ratio: 63/88;
-  border: 3px solid var(--accent); border-radius: 12px;
-  box-shadow: 0 0 0 100vmax rgba(0,0,0,0.45); pointer-events: none;
-}
-.camera-controls {
-  position: absolute; bottom: calc(24px + var(--safe-bottom)); left: 0; right: 0;
-  display: flex; justify-content: center; gap: 24px; align-items: center;
-}
-.shutter {
-  width: 68px; height: 68px; border-radius: 50%; background: white;
-  border: 5px solid rgba(255,255,255,0.4); cursor: pointer;
-}
-.camera-cancel { position: absolute; top: calc(16px + var(--safe-top)); right: 16px;
-  background: rgba(0,0,0,0.5); color: white; border: none; border-radius: 99px;
-  padding: 8px 16px; font-size: 15px; cursor: pointer;
+/* ---- photo slots ---- */
+.photo-wrap { position: relative; flex: 1; }
+.photo-lib {
+  position: absolute; top: 8px; right: 8px; z-index: 2;
+  background: rgba(0,0,0,0.55); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px 8px; font-size: 16px; cursor: pointer;
 }
 
 /* ---- grade display ---- */

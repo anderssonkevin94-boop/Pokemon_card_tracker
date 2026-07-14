@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { db, getSetting, todayFromDate, type CardSide, type SellStatus, type Variant } from '../db'
-import { searchCards, availableVariants, priceForVariant, bestPrice, type ApiCard } from '../api/pokemonTcg'
+import {
+  searchCards,
+  searchByNumberTotal,
+  availableVariants,
+  priceForVariant,
+  bestPrice,
+  type ApiCard,
+} from '../api/pokemonTcg'
 import { compressImage } from '../lib/imageUtils'
 import { estimateGrade } from '../lib/grading'
-import CameraCapture from '../components/CameraCapture'
 
 const VARIANT_LABELS: Record<string, string> = {
   normal: 'Normal',
@@ -17,7 +23,6 @@ const VARIANT_LABELS: Record<string, string> = {
 
 export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void }) {
   const [photos, setPhotos] = useState<{ front?: Blob; back?: Blob }>({})
-  const [cameraFor, setCameraFor] = useState<CardSide | null>(null)
   const [name, setName] = useState('')
   const [number, setNumber] = useState('')
   const [candidates, setCandidates] = useState<ApiCard[] | null>(null)
@@ -31,21 +36,17 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
   const [sellStatus, setSellStatus] = useState<SellStatus>('undecided')
   const [saving, setSaving] = useState(false)
   const previews = useRef<Map<Blob, string>>(new Map())
-  const identifiedBlob = useRef<Blob | null>(null)
+  // Full-resolution captures — OCR and grading read these; only the
+  // compressed copies are stored.
+  const originals = useRef<{ front?: Blob; back?: Blob }>({})
+  const pendingSide = useRef<CardSide>('front')
+  const cameraInput = useRef<HTMLInputElement>(null)
+  const libraryInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     const map = previews.current
     return () => map.forEach((url) => URL.revokeObjectURL(url))
   }, [])
-
-  // Auto-identify whenever a new front photo lands.
-  useEffect(() => {
-    if (photos.front && photos.front !== identifiedBlob.current) {
-      identifiedBlob.current = photos.front
-      identify(photos.front)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [photos.front])
 
   function previewUrl(blob: Blob): string {
     let url = previews.current.get(blob)
@@ -56,10 +57,25 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
     return url
   }
 
-  async function onCaptured(side: CardSide, raw: Blob) {
-    setCameraFor(null)
-    const compressed = await compressImage(raw)
+  function openCamera(side: CardSide) {
+    pendingSide.current = side
+    cameraInput.current?.click()
+  }
+
+  function openLibrary(side: CardSide) {
+    pendingSide.current = side
+    libraryInput.current?.click()
+  }
+
+  async function onFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-picking the same file
+    if (!file) return
+    const side = pendingSide.current
+    originals.current[side] = file
+    const compressed = await compressImage(file, 2048, 0.85)
     setPhotos((p) => ({ ...p, [side]: compressed }))
+    if (side === 'front') identify(file)
   }
 
   async function identify(front: Blob) {
@@ -71,38 +87,61 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
     try {
       setIdentifying('Reading card text…')
       const { readCardText, nameSimilarity } = await import('../lib/cardId')
-      const reading = await readCardText(front)
+      const reading = await readCardText(front, (s) => setIdentifying(s))
       if (!reading.name && !reading.number) {
         setOcrHint('Couldn’t read the card — search manually below.')
         setShowManual(true)
         return
       }
       setOcrHint(
-        `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}` : ''}`,
+        `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}${reading.total ? `/${reading.total}` : ''}` : ''}`,
       )
       setIdentifying('Finding matches…')
       const apiKey = await getSetting('apiKey')
-      // Precise pass first (name + collector number), then name-only to fill
-      // out alternates — the name-only page holds only the ~24 newest prints.
-      const exact = reading.number
-        ? await searchCards({ name: reading.name, number: reading.number, apiKey })
-        : []
-      const broad = await searchCards({ name: reading.name, apiKey })
-      const seen = new Set<string>()
-      const found = [...exact, ...broad].filter((c) => !seen.has(c.id) && seen.add(c.id))
-      if (found.length === 0) {
+
+      // Three passes, most precise first:
+      // 1. number + set size ("58/102" is nearly unique across all sets)
+      // 2. name + number
+      // 3. name only (newest prints) — fills out the alternates
+      const passes: { cards: ApiCard[]; boost: number }[] = []
+      if (reading.number && reading.total) {
+        passes.push({ cards: await searchByNumberTotal(reading.number, reading.total, apiKey), boost: 3 })
+      }
+      if (reading.name && reading.number) {
+        passes.push({ cards: await searchCards({ name: reading.name, number: reading.number, apiKey }), boost: 2 })
+      }
+      if (reading.name) {
+        let broad = await searchCards({ name: reading.name, apiKey })
+        // OCR often mangles one word — retry with the first word alone
+        if (broad.length === 0 && reading.name.includes(' ')) {
+          broad = await searchCards({ name: reading.name.split(' ')[0], apiKey })
+        }
+        passes.push({ cards: broad, boost: 0 })
+      }
+
+      const scoreById = new Map<string, { c: ApiCard; score: number; order: number }>()
+      let order = 0
+      for (const pass of passes) {
+        for (const c of pass.cards) {
+          const nameScore = reading.name ? nameSimilarity(reading.name, c.name) : 0
+          const numScore =
+            reading.number && parseInt(c.number, 10) === parseInt(reading.number, 10) ? 1 : 0
+          const score = pass.boost + nameScore + numScore
+          const existing = scoreById.get(c.id)
+          if (!existing || existing.score < score) {
+            scoreById.set(c.id, { c, score, order: existing?.order ?? order++ })
+          }
+        }
+      }
+      const ranked = [...scoreById.values()]
+        .sort((a, b) => b.score - a.score || a.order - b.order)
+        .map((s) => s.c)
+
+      if (ranked.length === 0) {
         setOcrHint(`Read "${reading.name ?? reading.number}" but found no matches — search manually below.`)
         setShowManual(true)
         return
       }
-      const scored = found
-        .map((c, i) => {
-          let score = reading.name ? nameSimilarity(reading.name, c.name) : 0
-          if (reading.number && parseInt(c.number, 10) === parseInt(reading.number, 10)) score += 2
-          return { c, score, i }
-        })
-        .sort((a, b) => b.score - a.score || a.i - b.i)
-      const ranked = scored.map((s) => s.c)
       setCandidates(ranked.slice(0, 6))
       pick(ranked[0]) // most likely match, preselected — user approves before saving
     } catch (e) {
@@ -168,9 +207,10 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
           high: prices.high,
         })
       }
-      // Grade in the background — the card is already saved.
-      if (photos.front) {
-        estimateGrade(photos.front)
+      // Grade in the background from the full-res capture — card is already saved.
+      const gradeSource = originals.current.front ?? photos.front
+      if (gradeSource) {
+        estimateGrade(gradeSource)
           .then((grade) => db.cards.update(cardId, { gradeEstimate: grade }))
           .catch(() => {})
       }
@@ -192,18 +232,26 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
       <h2>1. Photos</h2>
       <div className="row" style={{ alignItems: 'stretch' }}>
         {(['front', 'back'] as const).map((side) => (
-          <button key={side} className="photo-slot" onClick={() => setCameraFor(side)}>
-            {photos[side] ? (
-              <img src={previewUrl(photos[side]!)} alt={`${side} of card`} />
-            ) : (
-              <>
-                <span style={{ fontSize: 28 }}>📷</span>
-                <span>{side === 'front' ? 'Front (identifies + grades)' : 'Back (optional)'}</span>
-              </>
-            )}
-          </button>
+          <div key={side} className="photo-wrap">
+            <button className="photo-slot" onClick={() => openCamera(side)}>
+              {photos[side] ? (
+                <img src={previewUrl(photos[side]!)} alt={`${side} of card`} />
+              ) : (
+                <>
+                  <span style={{ fontSize: 28 }}>📷</span>
+                  <span>{side === 'front' ? 'Front (identifies + grades)' : 'Back (optional)'}</span>
+                </>
+              )}
+            </button>
+            <button className="photo-lib" title="Choose from library" onClick={() => openLibrary(side)}>
+              🖼️
+            </button>
+          </div>
         ))}
       </div>
+      {/* native camera app — full photo quality, no permission prompts */}
+      <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={onFilePicked} />
+      <input ref={libraryInput} type="file" accept="image/*" hidden onChange={onFilePicked} />
 
       <h2>2. Identify</h2>
       {identifying && <p className="dim">⏳ {identifying}</p>}
@@ -294,10 +342,6 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
             {searching ? 'Searching…' : 'Search'}
           </button>
         </div>
-      )}
-
-      {cameraFor && (
-        <CameraCapture onCapture={(b) => onCaptured(cameraFor, b)} onCancel={() => setCameraFor(null)} />
       )}
     </div>
   )

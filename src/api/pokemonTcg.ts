@@ -48,6 +48,22 @@ export async function searchCards(
   return json.data ?? []
 }
 
+// "58/102" → number 58 in a 102-card set. The denominator pins down the set,
+// so this is the highest-confidence identification query.
+export async function searchByNumberTotal(
+  number: string,
+  total: string,
+  apiKey?: string,
+): Promise<ApiCard[]> {
+  const q = encodeURIComponent(`number:${number} set.printedTotal:${total}`)
+  const res = await request(
+    `/cards?q=${q}&pageSize=10&orderBy=-set.releaseDate&select=id,name,number,rarity,set,images,tcgplayer,cardmarket`,
+    apiKey,
+  )
+  const json = await res.json()
+  return json.data ?? []
+}
+
 // Batched lookup for the daily price refresh. ~100 ids per request keeps URLs
 // well under length limits; 3000 cards ≈ 30 requests.
 export async function fetchCardsByIds(ids: string[], apiKey?: string): Promise<ApiCard[]> {
