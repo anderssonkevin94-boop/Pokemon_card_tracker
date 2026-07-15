@@ -27,9 +27,21 @@ function patchColor(img: ImageData, px: number, py: number, size: number): [numb
   return [r / n, g / n, b / n]
 }
 
-// Locate the card: pixels that differ from the background (sampled at the 4
-// image corners). Bounds use 1st/99th percentiles to resist stray noise.
-export function findCardBounds(img: ImageData): { rect: Rect; coverage: number } | null {
+export interface Point {
+  x: number
+  y: number
+}
+
+export interface Quad {
+  tl: Point
+  tr: Point
+  br: Point
+  bl: Point
+}
+
+// Foreground mask: pixels that differ from the background (sampled at the 4
+// image corners). Shared by bounds and quad detection.
+function buildMask(img: ImageData): { xs: number[]; ys: number[]; coverage: number } {
   const { data, width, height } = img
   const p = Math.max(4, Math.floor(Math.min(width, height) * 0.04))
   const corners = [
@@ -41,7 +53,6 @@ export function findCardBounds(img: ImageData): { rect: Rect; coverage: number }
   const THRESH = 90
   const xs: number[] = []
   const ys: number[] = []
-  let maskCount = 0
   for (let y = 0; y < height; y += 2) {
     for (let x = 0; x < width; x += 2) {
       const i = (y * width + x) * 4
@@ -49,17 +60,45 @@ export function findCardBounds(img: ImageData): { rect: Rect; coverage: number }
       if (!isBg) {
         xs.push(x)
         ys.push(y)
-        maskCount++
       }
     }
   }
-  const sampled = (width / 2) * (height / 2)
-  if (maskCount < sampled * 0.08) return null
-  xs.sort((a, b) => a - b)
-  ys.sort((a, b) => a - b)
+  return { xs, ys, coverage: xs.length / ((width / 2) * (height / 2)) }
+}
+
+// Bounds use 1st/99th percentiles to resist stray noise.
+export function findCardBounds(img: ImageData): { rect: Rect; coverage: number } | null {
+  const { xs, ys, coverage } = buildMask(img)
+  if (coverage < 0.08) return null
+  const sx = [...xs].sort((a, b) => a - b)
+  const sy = [...ys].sort((a, b) => a - b)
   const pct = (arr: number[], q: number) => arr[Math.floor(arr.length * q)]
   return {
-    rect: { x0: pct(xs, 0.01), y0: pct(ys, 0.01), x1: pct(xs, 0.99), y1: pct(ys, 0.99) },
-    coverage: maskCount / sampled,
+    rect: { x0: pct(sx, 0.01), y0: pct(sy, 0.01), x1: pct(sx, 0.99), y1: pct(sy, 0.99) },
+    coverage,
+  }
+}
+
+// Card corners for perspective correction: extremes of x+y / x−y over the
+// mask (valid for convex shapes). Each corner is the average of the 12 most
+// extreme points so a stray noise pixel can't hijack it.
+export function findCardQuad(img: ImageData): Quad | null {
+  const { xs, ys, coverage } = buildMask(img)
+  if (coverage < 0.08) return null
+  const n = xs.length
+  const bySum: number[] = Array.from({ length: n }, (_, i) => i)
+  bySum.sort((a, b) => xs[a] + ys[a] - (xs[b] + ys[b]))
+  const byDiff: number[] = Array.from({ length: n }, (_, i) => i)
+  byDiff.sort((a, b) => xs[a] - ys[a] - (xs[b] - ys[b]))
+  const avg = (idx: number[]): Point => ({
+    x: idx.reduce((s, i) => s + xs[i], 0) / idx.length,
+    y: idx.reduce((s, i) => s + ys[i], 0) / idx.length,
+  })
+  const k = Math.min(12, n)
+  return {
+    tl: avg(bySum.slice(0, k)),
+    br: avg(bySum.slice(-k)),
+    bl: avg(byDiff.slice(0, k)),
+    tr: avg(byDiff.slice(-k)),
   }
 }

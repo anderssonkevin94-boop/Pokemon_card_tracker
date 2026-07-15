@@ -99,18 +99,26 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
       ])
       const reading = ocrRes.status === 'fulfilled' ? ocrRes.value : {}
       const hashMatches = hashRes.status === 'fulfilled' ? hashRes.value : []
-      // beyond ~46/128 bits a hash "match" is noise — don't let it vote
-      const usableHashes = hashMatches.filter((m) => m.distance <= 46)
+      // beyond ~38/128 bits a hash "match" is noise — don't let it vote
+      const usableHashes = hashMatches.filter((m) => m.distance <= 38)
+      const bestDist = hashMatches[0]?.distance
 
       if (!reading.name && !reading.number && usableHashes.length === 0) {
-        setOcrHint('Couldn’t identify the card — search manually below.')
+        setOcrHint(
+          `Couldn’t identify the card — search manually below.${bestDist != null ? ` (closest image d=${bestDist})` : ''}`,
+        )
         setShowManual(true)
         return
       }
       const readPart = reading.name || reading.number
         ? `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}${reading.total ? `/${reading.total}` : ''}` : ''}`
         : 'Text unreadable'
-      const matchPart = usableHashes.length > 0 ? ' · image matched' : ''
+      const matchPart =
+        usableHashes.length > 0
+          ? ` · image matched (d=${bestDist})`
+          : bestDist != null
+            ? ` · weak image match (d=${bestDist})`
+            : ''
       setOcrHint(readPart + matchPart)
 
       setIdentifying('Finding matches…')
@@ -125,7 +133,7 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
       if (usableHashes.length > 0) {
         const byDist = new Map(usableHashes.map((m) => [m.id, m.distance]))
         const cards = await fetchCardsByIds([...byDist.keys()], apiKey)
-        passes.push({ cards, boost: (c) => Math.max(0, (46 - (byDist.get(c.id) ?? 46)) / 8) })
+        passes.push({ cards, boost: (c) => Math.max(0, (44 - (byDist.get(c.id) ?? 44)) / 7) })
       }
       if (reading.number && reading.total) {
         passes.push({ cards: await searchByNumberTotal(reading.number, reading.total, apiKey), boost: 3 })
