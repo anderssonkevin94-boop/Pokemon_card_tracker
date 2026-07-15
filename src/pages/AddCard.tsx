@@ -111,7 +111,7 @@ export default function AddCard({ onSaved }: { onSaved: (cardId: number) => void
         return
       }
       const readPart = reading.name || reading.number
-        ? `Read: ${reading.name ?? '(no name)'}${reading.number ? ` · #${reading.number}${reading.total ? `/${reading.total}` : ''}` : ''}`
+        ? `Read: ${reading.name ?? '(no name)'}${reading.rawName ? ` (from “${reading.rawName}”)` : ''}${reading.number ? ` · #${reading.number}${reading.total ? `/${reading.total}` : ''}` : ''}`
         : 'Text unreadable'
       const matchPart =
         usableHashes.length > 0

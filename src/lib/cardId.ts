@@ -6,9 +6,42 @@ import { extractFlatCard } from './cardExtract'
 import { orientedBitmap } from './imageUtils'
 
 export interface CardTextReading {
-  name?: string
+  name?: string // snapped to the nearest real card name when close enough
+  rawName?: string // what OCR actually read, when it differs from name
   number?: string // collector number, e.g. "58" from "58/102"
   total?: string // set size, e.g. "102" from "58/102" — pinpoints the set
+}
+
+// Every distinct card name ships with the app; OCR output gets snapped to
+// the nearest real name so a near-miss ("Kuogre") still finds the card.
+let namesPromise: Promise<string[]> | null = null
+function loadNames(): Promise<string[]> {
+  namesPromise ??= fetch('/card-names.json').then((r) => {
+    if (!r.ok) throw new Error('name list unavailable')
+    return r.json()
+  })
+  return namesPromise
+}
+
+async function snapToRealName(raw: string): Promise<{ name: string; snapped: boolean }> {
+  try {
+    const names = await loadNames()
+    let best = ''
+    let bestSim = 0
+    for (const n of names) {
+      // cheap length prefilter before the full edit-distance
+      if (Math.abs(n.length - raw.length) > Math.max(3, raw.length * 0.5)) continue
+      const sim = nameSimilarity(raw, n)
+      if (sim > bestSim) {
+        bestSim = sim
+        best = n
+      }
+    }
+    if (bestSim >= 0.55) return { name: best, snapped: best.toLowerCase() !== raw.toLowerCase() }
+  } catch {
+    // dictionary unavailable — use the raw reading
+  }
+  return { name: raw, snapped: false }
 }
 
 export type StatusFn = (status: string) => void
@@ -147,8 +180,15 @@ export async function readCardText(front: Blob, onStatus?: StatusFn): Promise<Ca
   }
   sources.forEach((s) => s.close?.())
 
+  let rawName: string | undefined
+  if (name) {
+    const snap = await snapToRealName(name)
+    if (snap.snapped) rawName = name
+    name = snap.name
+  }
   return {
     name,
+    rawName,
     number: numMatch ? String(parseInt(numMatch[1], 10)) : undefined,
     total: numMatch ? String(parseInt(numMatch[2], 10)) : undefined,
   }

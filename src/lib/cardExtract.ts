@@ -109,15 +109,24 @@ export async function extractFlatCard(photo: Blob, outW = 540): Promise<FlatCard
     return { canvas: fullFrame(), quadFound: false, refined: false }
   }
 
-  // Second pass inside the flattened result: if a clearly smaller convex
-  // region is found (card inside sleeve/toploader), crop down to it.
+  // Second pass inside the flattened result: if a smaller CARD-SHAPED convex
+  // region is found (card inside sleeve/toploader), crop down to it. The
+  // aspect gate matters: without it the artwork box of a plain card (nearly
+  // square, ~half the area) gets mistaken for an inner card and the name
+  // band is cropped away.
   let refined = false
   try {
     const flatImg = flat.getContext('2d')!.getImageData(0, 0, outW, outH)
     const inner = findCardQuad(flatImg)
     if (inner) {
       const frac = quadArea(inner) / (outW * outH)
-      if (frac > 0.45 && frac < 0.96) {
+      const dist = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+        Math.hypot(a.x - b.x, a.y - b.y)
+      const innerAspect =
+        (dist(inner.tl, inner.tr) + dist(inner.bl, inner.br)) /
+        (dist(inner.tl, inner.bl) + dist(inner.tr, inner.br))
+      const aspectOk = Math.abs(innerAspect / (outW / outH) - 1) < 0.12
+      if (frac > 0.5 && frac < 0.96 && aspectOk) {
         flat = unwarpQuad(flatImg, inner, outW, outH)
         refined = true
       }
