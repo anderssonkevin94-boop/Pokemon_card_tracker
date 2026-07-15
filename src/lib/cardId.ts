@@ -2,7 +2,7 @@
 // strip) with Tesseract.js, entirely on-device. This module is dynamically
 // imported so the ~3MB OCR engine only loads the first time it's needed.
 import { createWorker, PSM, type Worker } from 'tesseract.js'
-import { findCardBounds } from './cardDetect'
+import { extractFlatCard } from './cardExtract'
 import { orientedBitmap } from './imageUtils'
 
 export interface CardTextReading {
@@ -80,7 +80,7 @@ function preprocess(canvas: HTMLCanvasElement): void {
 }
 
 function crop(
-  bitmap: ImageBitmap,
+  bitmap: CanvasImageSource,
   x: number,
   y: number,
   w: number,
@@ -99,35 +99,19 @@ function crop(
   return canvas
 }
 
-// Run OCR on the ORIGINAL capture (full camera resolution) — never the
-// compressed copy stored for display; small collector numbers need the detail.
-// Tries the auto-detected card region first, then the whole frame (covers
-// photos where the card fills the frame, which breaks background detection).
+// Run OCR on the perspective-corrected card extracted from the ORIGINAL
+// capture (never the compressed copy stored for display). Falls back to the
+// raw frame when the card couldn't be flattened cleanly.
 export async function readCardText(front: Blob, onStatus?: StatusFn): Promise<CardTextReading> {
-  const bitmap = await orientedBitmap(front)
+  const flat = await extractFlatCard(front, 700)
 
-  // find the card at analysis scale, then map the rect back to full resolution
-  const scale = Math.min(1, 800 / Math.max(bitmap.width, bitmap.height))
-  const small = document.createElement('canvas')
-  small.width = Math.round(bitmap.width * scale)
-  small.height = Math.round(bitmap.height * scale)
-  const sctx = small.getContext('2d')!
-  sctx.drawImage(bitmap, 0, 0, small.width, small.height)
-  const found = findCardBounds(sctx.getImageData(0, 0, small.width, small.height))
-
-  const full = { x0: 0, y0: 0, x1: bitmap.width, y1: bitmap.height }
-  const rects = [full]
-  if (found) {
-    const detected = {
-      x0: found.rect.x0 / scale,
-      y0: found.rect.y0 / scale,
-      x1: found.rect.x1 / scale,
-      y1: found.rect.y1 / scale,
-    }
-    // only worth a separate pass if it's meaningfully smaller than the frame
-    if ((detected.x1 - detected.x0) * (detected.y1 - detected.y0) < bitmap.width * bitmap.height * 0.92) {
-      rects.unshift(detected)
-    }
+  // OCR sources, best first: the flattened card, then the raw frame.
+  const sources: { src: CanvasImageSource; w: number; h: number; close?: () => void }[] = [
+    { src: flat.canvas, w: flat.canvas.width, h: flat.canvas.height },
+  ]
+  if (flat.quadFound) {
+    const bitmap = await orientedBitmap(front)
+    sources.push({ src: bitmap, w: bitmap.width, h: bitmap.height, close: () => bitmap.close() })
   }
 
   const worker = await getWorker(onStatus)
@@ -139,13 +123,11 @@ export async function readCardText(front: Blob, onStatus?: StatusFn): Promise<Ca
   let nameConf = 0
   let numMatch: RegExpMatchArray | null = null
 
-  for (const r of rects) {
-    const w = r.x1 - r.x0
-    const h = r.y1 - r.y0
+  for (const { src, w, h } of sources) {
     if (!name || nameConf < 60) {
       // name: top band (skip the outermost border), full width to survive tilt
       const res = await worker.recognize(
-        crop(bitmap, r.x0 + w * 0.04, r.y0 + h * 0.025, w * 0.92, h * 0.115, true),
+        crop(src, w * 0.04, h * 0.025, w * 0.92, h * 0.115, true),
       )
       const cleaned = cleanName(res.data.text)
       if (cleaned && res.data.confidence > nameConf) {
@@ -157,13 +139,13 @@ export async function readCardText(front: Blob, onStatus?: StatusFn): Promise<Ca
       // collector number: bottom strip ("58/102" bottom-right on old cards,
       // "025/165" bottom-left on modern ones); enhanced + raw variants because
       // preprocessing helps some prints and hurts others
-      const numArgs = [r.x0 + w * 0.02, r.y1 - h * 0.09, w * 0.96, h * 0.08] as const
-      numMatch = (await worker.recognize(crop(bitmap, ...numArgs, false))).data.text.match(NUM_RE)
-      numMatch ??= (await worker.recognize(crop(bitmap, ...numArgs, true))).data.text.match(NUM_RE)
+      const numArgs = [w * 0.02, h * 0.91, w * 0.96, h * 0.08] as const
+      numMatch = (await worker.recognize(crop(src, ...numArgs, false))).data.text.match(NUM_RE)
+      numMatch ??= (await worker.recognize(crop(src, ...numArgs, true))).data.text.match(NUM_RE)
     }
     if (name && nameConf >= 60 && numMatch) break
   }
-  bitmap.close()
+  sources.forEach((s) => s.close?.())
 
   return {
     name,
